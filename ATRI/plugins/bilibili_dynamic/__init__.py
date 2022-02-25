@@ -111,10 +111,11 @@ from queue import Queue
 # 任务队列（taskQueue）
 tq = Queue()
 
+
 # 业务逻辑
 # 每10s从任务队列中拉一个uid出来，调用api进行查询
 # 当任务队列为空时，从数据库读取订阅列表，并塞入任务队列tq中
-@scheduler.scheduled_job("interval", name="b站动态检查", seconds=10)
+@scheduler.scheduled_job("interval", name="b站动态检查", seconds=10, max_instances=3, misfire_grace_time=60)
 async def _check_dynamic():
     from ATRI.database.models import Subscription
     subscriptor = BilibiliDynamicSubscriptor()
@@ -138,7 +139,7 @@ async def _check_dynamic():
                 # print(text,pic_url)
                 output = Message(
                     [MessageSegment.text(text),
-                    MessageSegment.image(pic_url)]
+                     MessageSegment.image(pic_url)]
                 )
                 bot = get_bot()
                 await bot.send_group_msg(group_id=d.groupid, message=output)
