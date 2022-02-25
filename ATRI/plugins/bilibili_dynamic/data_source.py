@@ -26,8 +26,9 @@ def get_api(field: str):
     Returns:
         dict, 该 API 的内容。
     """
-    path = os.path.abspath(os.path.join(os.path.dirname(
-        __file__), f"{field.lower()}.json"))
+    path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), f"{field.lower()}.json")
+    )
     if os.path.exists(path):
         with open(path, encoding="utf8") as f:
             return json.loads(f.read())
@@ -52,13 +53,15 @@ def get_session():
     return session
 
 
-async def bilibili_request(method: str,
-                           url: str,
-                           params: dict = None,
-                           data: Any = None,
-                           no_csrf: bool = False,
-                           json_body: bool = False,
-                           **kwargs):
+async def bilibili_request(
+    method: str,
+    url: str,
+    params: dict = None,
+    data: Any = None,
+    no_csrf: bool = False,
+    json_body: bool = False,
+    **kwargs,
+):
     """
     向接口发送请求。
 
@@ -79,7 +82,7 @@ async def bilibili_request(method: str,
     # 使用 Referer 和 UA 请求头以绕过反爬虫机制
     DEFAULT_HEADERS = {
         "Referer": "https://www.bilibili.com",
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
     }
     headers = DEFAULT_HEADERS
 
@@ -87,11 +90,11 @@ async def bilibili_request(method: str,
         params = {}
 
     # 自动添加 csrf
-    if not no_csrf and method in ['POST', 'DELETE', 'PATCH']:
+    if not no_csrf and method in ["POST", "DELETE", "PATCH"]:
         if data is None:
             data = {}
-        data['csrf'] = ""
-        data['csrf_token'] = ""
+        data["csrf"] = ""
+        data["csrf_token"] = ""
 
     # jsonp
 
@@ -104,7 +107,7 @@ async def bilibili_request(method: str,
         "params": params,
         "data": data,
         "headers": headers,
-        "cookies": ""
+        "cookies": "",
     }
 
     config.update(kwargs)
@@ -138,10 +141,9 @@ async def bilibili_request(method: str,
         raw_data = await resp.text()
         resp_data: dict
 
-        if 'callback' in params:
+        if "callback" in params:
             # JSONP 请求
-            resp_data = json.loads(
-                re.match("^.*?({.*}).*$", raw_data, re.S).group(1))
+            resp_data = json.loads(re.match("^.*?({.*}).*$", raw_data, re.S).group(1))
         else:
             # JSON
             resp_data = json.loads(raw_data)
@@ -153,9 +155,9 @@ async def bilibili_request(method: str,
             raise Exception("API 返回数据未含 code 字段")
 
         if code != 0:
-            msg = resp_data.get('msg', None)
+            msg = resp_data.get("msg", None)
             if msg is None:
-                msg = resp_data.get('message', None)
+                msg = resp_data.get("message", None)
             if msg is None:
                 msg = "接口未返回错误信息"
             raise Exception(msg)
@@ -188,9 +190,7 @@ class User:
             dict: 调用接口返回的内容。
         """
         api = API["info"]["info"]
-        params = {
-            "mid": self.uid
-        }
+        params = {"mid": self.uid}
         return await bilibili_request("GET", url=api["url"], params=params)
 
     async def get_dynamics(self, offset: int = 0, need_top: bool = False):
@@ -213,11 +213,11 @@ class User:
         params = {
             "host_uid": self.uid,
             "offset_dynamic_id": offset,
-            "need_top": 1 if need_top else 0
+            "need_top": 1 if need_top else 0,
         }
         data = await bilibili_request("GET", url=api["url"], params=params)
         # card 字段自动转换成 JSON。
-        if 'cards' in data:
+        if "cards" in data:
             for card in data["cards"]:
                 card["card"] = json.loads(card["card"])
                 card["extend_json"] = json.loads(card["extend_json"])
@@ -235,7 +235,9 @@ class BilibiliDynamicSubscriptor(Service):
 
     async def remove_subscription(self, uid: int, groupid: int) -> bool:
         async with DB() as db:
-            res = await db.remove_subscription(query_map={'uid': uid, 'groupid': groupid})
+            res = await db.remove_subscription(
+                query_map={"uid": uid, "groupid": groupid}
+            )
             return res
 
     async def get_subscriptions(self, query_map: dict) -> list:
@@ -250,7 +252,7 @@ class BilibiliDynamicSubscriptor(Service):
 
     async def get_all_subscriptions(self) -> list:
         async with DB() as db:
-            res = await  db.get_all_subscriptions()
+            res = await db.get_all_subscriptions()
             return res
 
     # bilibili network function
@@ -273,6 +275,7 @@ class BilibiliDynamicSubscriptor(Service):
 
     def extract_dynamics_detail(self, dynamic_list: list) -> list:
         import time
+
         ret = []
         for d in dynamic_list:
             pattern = {}
@@ -331,10 +334,16 @@ class BilibiliDynamicSubscriptor(Service):
         return ret
 
     def generate_output(self, pattern: dict) -> (str, str):
-        text_part = '''【UP名称】{name}\n【动态类型】{dynamic_type}\n【动态ID】{dynamic_id}\n【时间】{time}\n【UID】{uid}\n【当前阅读次数】{view}\n【当前转发次数】{repost}\n【当前点赞次数】{like}\n【内容摘要】{content}\n'''.format(
-            name=pattern["name"], dynamic_type=pattern["type_zh"], dynamic_id=pattern["dynamic_id"],
+        text_part = """【UP名称】{name}\n【动态类型】{dynamic_type}\n【动态ID】{dynamic_id}\n【时间】{time}\n【UID】{uid}\n【当前阅读次数】{view}\n【当前转发次数】{repost}\n【当前点赞次数】{like}\n【内容摘要】{content}\n""".format(
+            name=pattern["name"],
+            dynamic_type=pattern["type_zh"],
+            dynamic_id=pattern["dynamic_id"],
             time=pattern["time"],
-            uid=pattern["uid"], view=pattern["view"], repost=pattern["repost"], like=pattern["like"],
-            content=pattern["content"])
+            uid=pattern["uid"],
+            view=pattern["view"],
+            repost=pattern["repost"],
+            like=pattern["like"],
+            content=pattern["content"],
+        )
         pic_part = pattern["pic"]
         return text_part, pic_part
