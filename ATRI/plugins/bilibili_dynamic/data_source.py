@@ -1,12 +1,227 @@
 from ATRI.service import Service
 from ATRI.rule import is_in_service
 from ATRI.database.db import DB
-
 from ATRI.utils import timestamp2datetime
-from bilibili_api import user
+
+import json
+import aiohttp
+import os
+import re
+import asyncio
+from typing import Any
 
 __doc__ = """b站订阅动态助手
 """
+
+__session_pool = {}
+
+
+def get_api(field: str):
+    """
+    获取 API。
+
+    Args:
+        field (str): API 所属分类，即 data/api 下的文件名（不含后缀名）
+
+    Returns:
+        dict, 该 API 的内容。
+    """
+    path = os.path.abspath(os.path.join(os.path.dirname(
+        __file__), f"{field.lower()}.json"))
+    if os.path.exists(path):
+        with open(path, encoding="utf8") as f:
+            return json.loads(f.read())
+
+
+API = get_api("user")
+
+
+def get_session():
+    """
+    获取当前模块的 aiohttp.ClientSession 对象，用于自定义请求
+
+    Returns:
+        aiohttp.ClientSession
+    """
+    loop = asyncio.get_event_loop()
+    session = __session_pool.get(loop, None)
+    if session is None:
+        session = aiohttp.ClientSession(loop=loop)
+        __session_pool[loop] = session
+
+    return session
+
+
+async def bilibili_request(method: str,
+                           url: str,
+                           params: dict = None,
+                           data: Any = None,
+                           no_csrf: bool = False,
+                           json_body: bool = False,
+                           **kwargs):
+    """
+    向接口发送请求。
+
+    Args:
+        method     (str)                 : 请求方法。
+        url        (str)                 : 请求 URL。
+        params     (dict, optional)      : 请求参数。
+        data       (Any, optional)       : 请求载荷。
+        no_csrf    (bool, optional)      : 不要自动添加 CSRF。
+        json_body (bool, optional) 载荷是否为 JSON
+
+    Returns:
+        接口未返回数据时，返回 None，否则返回该接口提供的 data 或 result 字段的数据。
+    """
+
+    method = method.upper()
+
+    # 使用 Referer 和 UA 请求头以绕过反爬虫机制
+    DEFAULT_HEADERS = {
+        "Referer": "https://www.bilibili.com",
+        "User-Agent": "Mozilla/5.0"
+    }
+    headers = DEFAULT_HEADERS
+
+    if params is None:
+        params = {}
+
+    # 自动添加 csrf
+    if not no_csrf and method in ['POST', 'DELETE', 'PATCH']:
+        if data is None:
+            data = {}
+        data['csrf'] = ""
+        data['csrf_token'] = ""
+
+    # jsonp
+
+    if params.get("jsonp", "") == "jsonp":
+        params["callback"] = "callback"
+
+    config = {
+        "method": method,
+        "url": url,
+        "params": params,
+        "data": data,
+        "headers": headers,
+        "cookies": ""
+    }
+
+    config.update(kwargs)
+
+    if json_body:
+        config["headers"]["Content-Type"] = "application/json"
+        config["data"] = json.dumps(config["data"])
+
+    session = get_session()
+
+    async with session.request(**config) as resp:
+
+        # 检查状态码
+        try:
+            resp.raise_for_status()
+        except aiohttp.ClientResponseError as e:
+            raise Exception(e.message)
+
+        # 检查响应头 Content-Length
+        content_length = resp.headers.get("content-length")
+        if content_length and int(content_length) == 0:
+            return None
+
+        # 检查响应头 Content-Type
+        content_type = resp.headers.get("content-type")
+
+        # 不是 application/json
+        if content_type.lower().index("application/json") == -1:
+            raise Exception("响应不是 application/json 类型")
+
+        raw_data = await resp.text()
+        resp_data: dict
+
+        if 'callback' in params:
+            # JSONP 请求
+            resp_data = json.loads(
+                re.match("^.*?({.*}).*$", raw_data, re.S).group(1))
+        else:
+            # JSON
+            resp_data = json.loads(raw_data)
+
+        # 检查 code
+        code = resp_data.get("code", None)
+
+        if code is None:
+            raise Exception("API 返回数据未含 code 字段")
+
+        if code != 0:
+            msg = resp_data.get('msg', None)
+            if msg is None:
+                msg = resp_data.get('message', None)
+            if msg is None:
+                msg = "接口未返回错误信息"
+            raise Exception(msg)
+
+        real_data = resp_data.get("data", None)
+        if real_data is None:
+            real_data = resp_data.get("result", None)
+        return real_data
+
+
+class User:
+    """
+    b站用户相关
+    """
+
+    def __init__(self, uid: int):
+        """
+        Args:
+            uid        (int)                 : 用户 UID
+        """
+        self.uid = uid
+
+        self.__self_info = None
+
+    async def get_user_info(self):
+        """
+        获取用户信息（昵称，性别，生日，签名，头像 URL，空间横幅 URL 等）
+
+        Returns:
+            dict: 调用接口返回的内容。
+        """
+        api = API["info"]["info"]
+        params = {
+            "mid": self.uid
+        }
+        return await bilibili_request("GET", url=api["url"], params=params)
+
+    async def get_dynamics(self, offset: int = 0, need_top: bool = False):
+        """
+        获取用户动态。
+
+        Args:
+            offset (str, optional):     该值为第一次调用本方法时，数据中会有个 next_offset 字段，
+                                        指向下一动态列表第一条动态（类似单向链表）。
+                                        根据上一次获取结果中的 next_offset 字段值，
+                                        循环填充该值即可获取到全部动态。
+                                        0 为从头开始。
+                                        Defaults to 0.
+            need_top (bool, optional):  显示置顶动态. Defaults to False.
+
+        Returns:
+            dict: 调用接口返回的内容。
+        """
+        api = API["info"]["dynamic"]
+        params = {
+            "host_uid": self.uid,
+            "offset_dynamic_id": offset,
+            "need_top": 1 if need_top else 0
+        }
+        data = await bilibili_request("GET", url=api["url"], params=params)
+        # card 字段自动转换成 JSON。
+        if 'cards' in data:
+            for card in data["cards"]:
+                card["card"] = json.loads(card["card"])
+                card["extend_json"] = json.loads(card["extend_json"])
+        return data
 
 
 class BilibiliDynamicSubscriptor(Service):
@@ -42,113 +257,15 @@ class BilibiliDynamicSubscriptor(Service):
 
     async def get_upname_by_uid(self, uid: int) -> str:
         try:
-            u = user.User(uid)
+            u = User(uid)
             info = await u.get_user_info()
             return info.get("name")
         except:
             return ""
-        # {
-        #     "mid": 401742377,
-        #     "name": "原神",
-        #     "sex": "保密",
-        #     "face": "http://i2.hdslb.com/bfs/face/d2a95376140fb1e5efbcbed70ef62891a3e5284f.jpg",
-        #     "face_nft": 0,
-        #     "sign": "原神官方账号",
-        #     "rank": 10000,
-        #     "level": 6,
-        #     "jointime": 0,
-        #     "moral": 0,
-        #     "silence": 0,
-        #     "coins": 0,
-        #     "fans_badge": true,
-        #     "fans_medal": {
-        #         "show": false,
-        #         "wear": false,
-        #         "medal": null
-        #     },
-        #     "official": {
-        #         "role": 3,
-        #         "title": "原神官方账号",
-        #         "desc": "",
-        #         "type": 1
-        #     },
-        #     "vip": {
-        #         "type": 2,
-        #         "status": 1,
-        #         "due_date": 1655049600000,
-        #         "vip_pay_type": 0,
-        #         "theme_type": 0,
-        #         "label": {
-        #             "path": "",
-        #             "text": "年度大会员",
-        #             "label_theme": "annual_vip",
-        #             "text_color": "#FFFFFF",
-        #             "bg_style": 1,
-        #             "bg_color": "#FB7299",
-        #             "border_color": ""
-        #         },
-        #         "avatar_subscript": 1,
-        #         "nickname_color": "#FB7299",
-        #         "role": 3,
-        #         "avatar_subscript_url": "http://i0.hdslb.com/bfs/vip/icon_Certification_big_member_22_3x.png"
-        #     },
-        #     "pendant": {
-        #         "pid": 3144,
-        #         "name": "原神",
-        #         "image": "http://i2.hdslb.com/bfs/garb/item/6d5969a4f02fa1d4e5776072dc9f0b006478e82b.png",
-        #         "expire": 0,
-        #         "image_enhance": "http://i2.hdslb.com/bfs/garb/item/ff5bde4a6337140b632beffd0cbbaaf927c03ac0.webp",
-        #         "image_enhance_frame": "http://i2.hdslb.com/bfs/garb/item/a1893352f03d1d6b321d504ba2ae0ecc0ea85647.png"
-        #     },
-        #     "nameplate": {
-        #         "nid": 0,
-        #         "name": "",
-        #         "image": "",
-        #         "image_small": "",
-        #         "level": "",
-        #         "condition": ""
-        #     },
-        #     "user_honour_info": {
-        #         "mid": 0,
-        #         "colour": null,
-        #         "tags": []
-        #     },
-        #     "is_followed": false,
-        #     "top_photo": "http://i0.hdslb.com/bfs/space/d64b33fe4afb1565108670f201c89c009ec236df.png",
-        #     "theme": {},
-        #     "sys_notice": {},
-        #     "live_room": {
-        #         "roomStatus": 1,
-        #         "liveStatus": 0,
-        #         "url": "https://live.bilibili.com/21987615",
-        #         "title": "《原神》2.5版本前瞻特别节目",
-        #         "cover": "http://i0.hdslb.com/bfs/live/new_room_cover/55e952e9c90c9a1c975c3ead1d81951a3be650bf.jpg",
-        #         "online": 24028762,
-        #         "roomid": 21987615,
-        #         "roundStatus": 0,
-        #         "broadcast_type": 0
-        #     },
-        #     "birthday": "",
-        #     "school": {
-        #         "name": ""
-        #     },
-        #     "profession": {
-        #         "name": "",
-        #         "department": "",
-        #         "title": "",
-        #         "is_show": 0
-        #     },
-        #     "tags": null,
-        #     "series": {
-        #         "user_upgrade_status": 3,
-        #         "show_upgrade_window": false
-        #     },
-        #     "is_senior_member": 0
-        # }
 
     async def get_recent_dynamic_by_uid(self, uid: int) -> dict:
         try:
-            u = user.User(uid)
+            u = User(uid)
             info = await u.get_dynamics()
             return info
         except:
